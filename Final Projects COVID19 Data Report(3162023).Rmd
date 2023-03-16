@@ -1,0 +1,422 @@
+---
+title: "Final Projects COVID19 Data Report"
+author: "Tung Anh Nguyen Sy"
+date: "2023-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE)
+```
+```{r libraries, echo = FALSE, results = 'hide', include = FALSE}
+library(tidyverse)
+library(lubridate)
+library(mgcv)
+library(gridExtra)
+```
+
+
+### INTRODUCTION
+
+This report examines publicly available data on COVID-19, including trends in cases, deaths, and vaccinations over time. It is presented in a way that is easy to read and understand. The report is available in its current format, as well as an alternate version that includes R code and can also be accessed at https://github.com/tanh3ka/Master-of-Science-in-Data-Science-5301.
+
+### DATA SOURCES
+
+The main data used in this research was obtained from publicly available COVID-19 data provided by The Johns Hopkins Center for Systems Science and Engineering. Specifically, the data was retrieved from the "COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University" which can be accessed [**here**](https://github.com/CSSEGISandData/COVID-19).
+
+Please take note that there are main data sets available for "COVID-19" information that contain time-series data about cases and deaths related to COVID-19 both in the US and worldwide. Additionally, there is also a secondary data set called "COVID-19_Unified-Dataset" that provides more details, such as statistics on vaccinations.
+
+The study conducted by Dong and colleagues was published in an article titled "An interactive web-based dashboard to track COVID-19 in real time". Lancet Inf Dis. 20(5):533-534. https://doi.org/10.1016/S1473-3099(20)30120-1. I highly recommend reviewing the interactive dashboard as it has been created very well. Access [**here**](https://www.arcgis.com/apps/dashboards/bda7594740fd40299423467b48e9ecf6) or [**here**](https://systems.jhu.edu/research/public-health/ncov/)
+
+Data on vaccinations was obtained from *Our World in Data* https://ourworldindata.org/ which is publicly available for use under the Creative Commons BY license. The authors have published their research on this topic in a paper titled "A global database of COVID-19 vaccinations" by Mathieu, Ritchie, Ortiz-Ospina, et al. (2021), which can be accessed at https://doi.org/10.1038/s41562-021-01122-8.  The corresponding github repository can be found [**here**](https://github.com/owid/covid-19-data/tree/master/public) It's worth noting that Our World in Data also provides an interactive and user-friendly data explorer tool in [**here**](https://ourworldindata.org/explorers/coronavirus-data-explorer)
+
+
+### METHODS
+
+To begin the analysis, the main COVID-19 dataset provided by JHU was used for initial exploration. This dataset contained cumulative counts of cases and deaths categorized by date, county, and state. The data was then processed further through the following steps:
+
+- The statewide data was aggregated (rather than county-level).
+- The national data was aggregated (rather than state-level).
+- New daily cases and deaths were computed.
+- The raw counts of cases and deaths were normalized or standardized by population size.
+
+Additionally, the secondary dataset containing vaccination data was obtained from the Our World in Data repository and combined with the primary dataset.
+
+```{r data}
+
+# Retrieve data from repository
+
+url_base <- 'https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/'
+
+file_name <- 'time_series_covid19_confirmed_US.csv'
+url <- str_c(url_base, file_name)
+US_cases <- read_csv(url, show_col_types = FALSE)
+
+file_name <- 'time_series_covid19_deaths_US.csv'
+url <- str_c(url_base, file_name)
+US_deaths <- read_csv(url, show_col_types = FALSE)
+
+# dataframe of US cases (cumulative) by county/state by date
+
+US_cases <- US_cases %>%
+    pivot_longer(cols = -c(UID:Combined_Key),
+               names_to = 'date',
+               values_to = 'cases') %>%
+  select(Admin2:Province_State, Combined_Key:last_col()) %>%
+  rename(County = Admin2,
+         State = Province_State) %>%
+  mutate(date = mdy(date)) %>%
+  select(-Combined_Key)
+
+# dataframe of US deaths (cumulative) by county/state by date
+
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -c(UID:Population),
+               names_to = 'date',
+               values_to = 'deaths') %>%
+  select(Admin2:Province_State, Population:last_col()) %>%
+  rename(County = Admin2,
+         State = Province_State) %>%
+  mutate(date = mdy(date))
+
+# dataframe with combined case and death totals by county/state and by date
+
+df_US <- US_cases %>% 
+  full_join(US_deaths) %>%
+  filter(cases >= 0)
+
+# dataframe of cases and deaths by state (not County level) by date
+
+US_by_state <- df_US %>%
+  group_by(State, date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths),
+            Population = sum(Population),
+            .groups = 'keep') %>%
+  ungroup()
+
+# dataframe of cases and deaths by US (not County/State level) by date
+
+US_totals <- US_by_state %>%
+  group_by(date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths),
+            Population = sum(Population),
+            .groups = 'keep') %>%
+  ungroup()
+
+# Compute new daily cases and deaths from cumulative totals
+
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+```
+```{r count-check}
+
+# comparing count totals to time period demonstrated in course lecture
+# results are comparable
+# note: corrections to data and counts do occur
+# https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data#data-modification-records
+
+US_by_state %>%
+  filter(date < '2021-03-01') %>%
+  group_by(date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths),
+            Population = sum(Population),
+            .groups = 'keep') %>%
+  ungroup() %>%
+  tail()
+```
+
+```{r per-population}
+
+# "normalizing" or standardizing gross counts per population
+
+US_state_totals <- US_by_state %>%
+  group_by(State) %>%
+  summarise(deaths = max(deaths),
+            cases = max(cases),
+            population = max(Population),
+            cases_per_K = 1000 * cases / population,
+            deaths_per_K = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+```
+
+```{r}
+
+# Retrieve vaccination data from repository
+
+US_state_vax <- read_csv('https://github.com/owid/covid-19-data/raw/master/public/data/vaccinations/us_state_vaccinations.csv', show_col_types = FALSE)
+
+# Data key/legend can be found here... 
+# <https://github.com/owid/covid-19-data/tree/master/public/data/vaccinations>
+
+```
+
+```{r combine-data}
+
+# Combine (case/death) count data and vaccination data
+
+US_totals <- US_state_vax %>%
+  filter(location == 'United States') %>%
+  select(date, people_vaccinated, people_fully_vaccinated) %>%
+  full_join(US_totals)
+```
+### RESULTS
+
+```{r data-results, echo = FALSE, results = 'asis', include = TRUE}
+cat('Data on the number of cases and deaths were available from ',
+    as.character(min(US_totals$date)), ' to ', as.character(max(US_totals$date)), '  \n', sep="")
+cat('Data on vaccination was available from ',
+    as.character(min(US_state_vax$date)), ' to ', as.character(max(US_state_vax$date)), '  \n', sep="")
+
+cat('\n')
+cat('During this timeframe, the following figures were observed in the US:  ', '  \n',
+    'A total of  ', format(max(US_totals$cases), big.mark = ','), '  \n',
+    'A total of  ', format(max(US_totals$deaths), big.mark = ','), '  \n', sep="")
+cat('Individuals who received at least one dose of the vaccine:  ', 
+    format(max(US_totals$people_vaccinated, na.rm = TRUE), big.mark = ','), '  \n',
+    'Individuals who completed the full vaccine series:  ',
+    format(max(US_totals$people_fully_vaccinated, na.rm = TRUE), big.mark = ','), '  \n', sep="")
+```
+
+```{r}
+
+# Find states with fewest deaths per population
+
+min_deaths <- US_state_totals %>%
+  slice_min(deaths_per_K, n = 10) %>%
+  select(State, deaths_per_K, everything())
+
+# Find states with highest deaths per population
+
+max_deaths <- US_state_totals %>%
+  slice_max(deaths_per_K, n = 10) %>%
+  select(State, deaths_per_K, everything())
+
+# Find states with highest cases per population
+
+max_cases <- US_state_totals %>%
+  slice_max(cases_per_K, n = 10) %>%
+  select(State, cases_per_K, everything())
+```
+
+```{r test, results = 'asis', include = TRUE}
+cat('The states with the highest number of per capita case (per 1,000 individuals):  \n  \n')
+for (i in 1:5){
+  cat(max_cases$State[i], ': ', round(max_cases$cases_per_K[i], 3), '  \n')
+}
+cat('\n')
+cat('The states with the smallest number of deaths per capita (per 1,000 individuals):  \n  \n')
+for (i in 1:5){
+  cat(min_deaths$State[i], ': ', round(min_deaths$deaths_per_K[i], 3), '  \n')
+}
+cat('\n')
+cat('The states with the highest number of deaths per capita (per 1,000 individuals):  \n  \n')
+for (i in 1:5){
+  cat(max_deaths$State[i], ': ', round(max_deaths$deaths_per_K[i], 3), '  \n')
+}
+```
+
+
+### VISUAL ANALYSIS
+
+To understand how COVID-19 cases have evolved over time, time series plots were utilized. By using these plots, we could observe the evolution of the cumulative number of cases. However, since the number of deaths is much smaller than the number of cases, the details of the number of deaths were not as apparent in the visualizations.
+
+```{r viz1, include = TRUE}
+
+options(repr.plot.width = 5, repr.plot.height = 5)
+ggplot(data = US_totals, aes(x = date)) +
+        geom_line(aes(y = cases, color = 'cases')) +
+        geom_line(aes(y = deaths, color = 'deaths')) +
+        ggtitle('US Cases and Deaths by Date') +
+        ylab('number of people') +
+        xlab('Date') +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        theme(text = element_text(size = 14))
+```
+
+By converting the number of cases and deaths to a logarithmic scale, they can be easily displayed on a graph for visualization purposes.
+
+```{r viz2, include = TRUE}
+US_totals %>%
+  ggplot(aes(x = date)) +
+          geom_line(aes(y = cases, color = 'cases')) +
+          geom_line(aes(y = deaths, color = 'deaths')) +
+          scale_y_log10() +
+          ggtitle('US Cases and Deaths by Date') +
+          ylab('number of people (log scale)') +
+          xlab('Date') +
+          theme(plot.title = element_text(hjust = 0.5)) +
+          theme(text = element_text(size = 14))
+```
+
+Since the previous visualizations display the total number of cases and deaths, it becomes challenging to perceive the day-to-day changes. Therefore, the following visualization showcases the number of new cases and deaths by date to provide a better understanding of the relative changes over time.
+
+```{r viz3, include = TRUE, warning = FALSE}
+US_totals %>%
+  # filter(date < '2021-03-01') %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_point(aes(color = 'new cases'), alpha = 0.3) +
+  geom_point(aes(y = new_deaths, color = 'new deaths'), alpha = 0.3) +
+  scale_y_log10() +
+  ylab('number of cases/deaths (log scale)') +
+  xlab('Date') +
+  ggtitle('New US Cases and Deaths by Date') +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(text = element_text(size = 14))
+```
+
+The subsequent visualization presents the evolution and correlation of the number of vaccinated individuals to the number of COVID-19 cases and deaths over time. The '1+ vax' category denotes the total number of individuals who have received at least one vaccine dose, whereas the 'full vax' category represents the number of people who have completed the full vaccination course, i.e., at least two doses. The scale used in this visualization is non-logarithmic, allowing for a more straightforward and natural interpretation of the relative size of the numbers within each category.
+
+```{r viz4, include = TRUE, warning = FALSE}
+ggplot(data = US_totals, aes(x = date)) +
+  geom_line(aes(y = cases, color = 'cases')) +
+  geom_line(aes(y = deaths, color = 'deaths')) +
+  geom_line(aes(y = people_vaccinated, color = '1+ vax')) +
+  geom_line(aes(y = people_fully_vaccinated, color = 'full vax'))  +
+  ylab('count') +
+  xlab('Date') +
+  ggtitle('US Cases / Deaths / Vaccinations by Date') +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(text = element_text(size = 14))
+```
+
+### SURVIVABILITY (Relationship between Deaths to Cases)
+
+The aim was to study the lethality or survivability of COVID illness, which was done by examining the relationship between deaths and cases. The visualizations below demonstrate this relationship. A consistent slope would indicate a fixed number of deaths per cases, while a flatter slope would indicate fewer deaths per cases, indicating lower lethality and higher survivability. On the other hand, a steeper slope would indicate more deaths per cases, indicating higher lethality and lower survivability.
+
+```{r viz5, include = TRUE}
+US_totals %>%
+  ggplot(aes(x = cases, y = deaths)) +
+        geom_point(alpha = 0.5) +
+        ylab('Deaths') +
+        xlab('Cases') +
+        ggtitle('US Cumulative Deaths ~ Cases') +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        theme(text = element_text(size = 14))
+```
+
+It is not unexpected that the relationship between deaths and cases is not a straightforward linear one. Several factors are likely to influence lethality or survivability during the COVID pandemic, including the introduction of new drugs, vaccines, boosters, changes in ventilatory support and management, new viral variants, and so on.
+
+In certain subsets, this non-linear relationship is particularly evident.
+
+```{r viz6, include = TRUE}
+US_by_state %>%
+  filter(State %in% c('California')) %>%
+  ggplot(aes(x = cases, y = deaths)) +
+        geom_point(alpha = 0.5) +
+        # geom_smooth(method = 'loess', span = 0.2, formula = y ~ x, color = 'black') +
+        ylab('Deaths') +
+        xlab('Cases') +
+        ggtitle('California Cumulative Deaths ~ Cases') +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        theme(text = element_text(size = 14))
+```
+
+### MODEL (Deaths on Cases)
+
+The previous observations of non-linearity prompted an examination of the impact of modeling on a linear or non-linear model. A visualization was created to demonstrate the differences between applying a linear model and a non-linear or non-parametric model to the actual data.
+
+```{r viz7, include = TRUE}
+
+ggplot(data = US_totals, aes(x = cases, y = deaths)) +
+      geom_point(alpha = 0.5, aes(color = 'Actual')) +
+      geom_smooth(formula = y ~ x, method = 'lm', aes(color = 'Linear')) +
+      geom_smooth(formula = y ~ x, method = 'loess', aes(color = 'Non-linear')) +  # note:  span = 1
+      scale_color_manual(breaks = c('Actual', 'Linear', 'Non-linear'),
+                         values = c('Actual' = 'grey45', 'Linear' = '#012169', 
+                                    'Non-linear' = '#CFB76C')) +
+      labs(color = 'Model Type')
+```
+
+Adjusting the parameter `span` for the loess method can result in a more accurate estimation line. However, the appropriate amount of smoothing required for modeling depends on the intended use of the model.
+
+```{r viz8, include = TRUE}
+ggplot(data = US_totals, aes(x = cases, y = deaths)) +
+      geom_point(alpha = 0.5, color = 'grey') +
+      geom_smooth(formula = y ~ x, method = 'loess', span = 0.3, color = '#CFB76C')
+```
+
+**Compare Model**
+
+The two models can be compared by computing the Mean Squared Prediction Error (MSPE) for each. To do this, the original dataset was divided into two parts: a training set (80%) and a testing set (20%). The models were built using the training set, and predictions were made using the testing set. The MSPE was then calculated by finding the difference between the predicted and actual values of the testing set and taking the mean of the squared differences.
+
+```{r MSPE, results = 'asis', include = TRUE}
+
+# Split data into train / test set
+
+set.seed(1876)  # CU Boulder was founded March 14, 1876  ;)
+n = floor(0.8 * nrow(US_totals))
+index = sample(seq_len(nrow(US_totals)), size = n)
+df_train = US_totals[index, ]
+df_test = US_totals[-index, ]
+
+# Create models (train set)
+
+model_linear = lm(data = df_train, deaths ~ cases)
+model_smooth = loess(data = df_train, deaths ~ cases, span = 0.3)
+
+#  Perform "Predictions" (test set)
+
+pred_linear = predict(model_linear, df_test)
+pred_smooth = predict(model_smooth, df_test)
+
+# Calculate MSPE
+
+MSPE_linear = mean((pred_linear - df_test$deaths)^2)
+MSPE_smooth = mean((pred_smooth - df_test$deaths)^2)
+
+# Report results
+
+if (MSPE_linear > MSPE_smooth){
+    result = c('higher', 'non-linear')
+  } else {
+    result = c('lower', 'linear')
+  }
+
+cat('The linear model had a ', result[1], ' MSPE at ', format(MSPE_linear, big.mark = ','), 
+    ' than the non-linear model at ', format(MSPE_smooth, big.mark = ','),
+    ' - indicating that the ', result[2], ' model is the preferred model.', sep = "")
+```
+
+### DISCUSSION
+
+**Model**  
+
+Choosing the most suitable model to predict the expected number of deaths based on the number of cases is a complicated task that depends on the intended use. According to the analysis presented here, the non-parametric model outperforms the linear model in terms of MSPE calculations. However, this conclusion should be considered in the context of the intended use. For instance, if the goal is to explain the relationship between deaths and cases, the non-parametric model is much better than the linear model. It is worth noting that the non-parametric model can perform even better by adjusting the smoothing span further. Conversely, if the objective is to make predictions, the linear model might be more preferable. It is not reasonable to expect that future changes in the relationship between deaths and cases will follow the same pattern as described by the non-parametric model, in which case, the linear model would be more appropriate for future predictions.
+
+It's more important to understand the difference between linear and non-parametric models than to find the best one. The plot helps to visually appreciate how the relationship between deaths and cases changes over time, which the analysis of the models confirms. It's important to note these changes in time and understand that they indicate a change in the underlying relationship, which could be due to factors such as a new viral strain, changes in vaccine efficacy, or improvements in treatment medications and modalities, for better or worse in the context of COVID-related disease.
+
+**Assessments**
+
+The correlation between deaths and cases, or the fatality and survival rate, is intricate. The dataset and data collection may contain biases and issues that could affect the results and analysis. However, most of these issues are expected to only have a small impact on the data, provided that the dataset is large enough. The dataset source provides a list of corrections for errors, indicating that mistakes can happen, such as inaccurate positivity rates, testing standards, identification of the disease, technical difficulties with data reporting, misclassification or incorrect classification of deaths as COVID-related, and others.
+
+**Further Elaboration - The Effectiveness of Vaccine**
+
+The idea of a change in linearity caused by a change in the underlying relationship is also apparent in the connection between vaccinations and the number of cases and deaths, which is demonstrated by the following visualizations. The abrupt shift in the relationship indicates a significant change. In this instance, the sudden increase in cases and deaths corresponds to the introduction of the COVID Omicron variant. However, this example highlights two critical principles: the possibility of detecting a shift in the underlying relationship, and the need to detect any such change before using a specific, such as a linear, model that covers periods with a different underlying relationship.
+
+```{r viz9, warning = FALSE, include = TRUE}
+p1 = US_totals %>%
+  filter(date >= '2021-01-12') %>%
+  ggplot(aes(x = people_vaccinated)) +
+  geom_line(aes(y = cases))
+
+p2 = US_totals %>%
+  filter(date >= '2021-01-12') %>%
+  ggplot(aes(x = people_vaccinated)) +
+  geom_line(aes(y = deaths))
+
+grid.arrange(p1, p2, nrow = 1)
+```
+
+```{r}
+sessionInfo()
+```
+
